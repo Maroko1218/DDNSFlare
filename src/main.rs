@@ -1,11 +1,6 @@
 const GET_IP_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 const API_URL: &str = "https://api.cloudflare.com/client/v4/";
 
-struct Args {
-    api_key_file: String,
-    ddns_name: String,
-}
-
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct ZoneResponse {
     result: Vec<Zone>,
@@ -41,44 +36,68 @@ struct DnsRecordPayload {
     ttl: u64,
 }
 
-fn main() {
-    let args = get_args();
+struct Args {
+    api_key_file: String,
+    ddns_name: String,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = get_args().ok_or("Usage: <api_key_file> <ddns_name>")?;
+
+    // We keep .expect here because the program literally cannot run without the key
     let api_key = std::fs::read_to_string(&args.api_key_file)
-        .expect(&format!("{} not found!", &args.api_key_file));
+        .expect("Cloudflare API key file could not be read")
+        .trim()
+        .to_string();
 
     let client = reqwest::blocking::Client::new();
-    loop {
-        let ip = get_ip(&client).expect("Unable to get own IP");
-        let zones = get_zones(&client, &api_key).expect("Failed fetching zones");
 
-        for zone in zones.result {
-            if args.ddns_name.ends_with(&zone.name) {
-                update_or_create_record(&client, &api_key, &zone.id, &args.ddns_name, &ip)
-            }
+    println!("Starting DDNS update loop for {}...", args.ddns_name);
+
+    loop {
+        match update_cycle(&client, &api_key, &args) {
+            Ok(_) => (),
+            Err(e) => eprintln!("Error during update cycle: {}", e),
         }
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
 }
 
-fn get_ip(client: &reqwest::blocking::Client) -> Result<String, reqwest::Error> {
-    let ip = client.get(GET_IP_URL).send()?.text()?;
-    Ok(ip
+fn update_cycle(
+    client: &reqwest::blocking::Client,
+    api_key: &str,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ip = get_ip(client)?;
+    let zones = get_zones(client, api_key)?;
+
+    for zone in zones.result {
+        if args.ddns_name.ends_with(&zone.name) {
+            update_or_create_record(client, api_key, &zone.id, &args.ddns_name, &ip)?;
+        }
+    }
+    Ok(())
+}
+
+fn get_ip(client: &reqwest::blocking::Client) -> Result<String, Box<dyn std::error::Error>> {
+    let text = client.get(GET_IP_URL).send()?.text()?;
+    let ip_line = text
         .lines()
-        .filter(|x| x.starts_with("ip="))
-        .next()
-        .expect("")
-        .replace("ip=", ""))
+        .find(|line| line.starts_with("ip="))
+        .ok_or("Could not find IP line in Cloudflare trace")?;
+
+    Ok(ip_line.replace("ip=", "").to_string())
 }
 
 fn get_zones(
     client: &reqwest::blocking::Client,
     api_key: &str,
 ) -> Result<ZoneResponse, reqwest::Error> {
-    Ok(client
+    client
         .get(format!("{API_URL}zones/"))
         .bearer_auth(api_key)
         .send()?
-        .json()?)
+        .json()
 }
 
 fn get_dns_records_of_zone(
@@ -86,20 +105,23 @@ fn get_dns_records_of_zone(
     api_key: &str,
     zone_id: &str,
 ) -> Result<DnsResponse, reqwest::Error> {
-    Ok(client
+    client
         .get(format!("{API_URL}zones/{zone_id}/dns_records"))
         .bearer_auth(api_key)
         .send()?
-        .json()?)
+        .json()
 }
 
-fn get_args() -> Args {
+fn get_args() -> Option<Args> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-
-    Args {
-        api_key_file: args[0].to_string(),
-        ddns_name: args[1].to_string(),
+    if args.len() < 2 {
+        return None;
     }
+
+    Some(Args {
+        api_key_file: args[0].clone(),
+        ddns_name: args[1].clone(),
+    })
 }
 
 fn update_or_create_record(
@@ -108,36 +130,43 @@ fn update_or_create_record(
     zone_id: &str,
     ddns_name: &str,
     ip: &str,
-) {
-    let zone = get_dns_records_of_zone(client, api_key, zone_id).expect("Somehow ID didn't match?");
-    let mut request = client.post(format!("{API_URL}zones/{zone_id}/dns_records"));
-    let new_record = DnsRecordPayload {
-        name: ddns_name.to_string(),
-        record_type: "A".to_string(),
-        proxied: false,
-        ttl: 1,
-        content: ip.to_string(),
-    };
-    for dns_record in zone.result {
-        if dns_record.name == ddns_name {
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dns_data = get_dns_records_of_zone(client, api_key, zone_id)?;
+
+    let mut request_builder = client.post(format!("{API_URL}zones/{zone_id}/dns_records"));
+    let mut is_update = false;
+
+    for dns_record in dns_data.result {
+        if dns_record.name == ddns_name && dns_record.record_type == "A" {
             if dns_record.content == ip {
-                return; // There was nothing to update
+                return Ok(()); // IP matches, no action needed
             }
-            request = client.patch(format!(
+            // Switch to PATCH if the record already exists
+            request_builder = client.patch(format!(
                 "{API_URL}zones/{zone_id}/dns_records/{}",
                 dns_record.id
             ));
+            is_update = true;
             break;
         }
     }
-    println!(
-        "{:?}",
-        request
-            .bearer_auth(api_key)
-            .json(&new_record)
-            .send()
-            .unwrap()
-            .text()
-            .unwrap()
-    );
+
+    let payload = DnsRecordPayload {
+        name: ddns_name.to_string(),
+        record_type: "A".to_string(),
+        proxied: false,
+        ttl: 1, // '1' is Auto in Cloudflare
+        content: ip.to_string(),
+    };
+
+    let response = request_builder.bearer_auth(api_key).json(&payload).send()?;
+
+    if response.status().is_success() {
+        let action = if is_update { "Updated" } else { "Created" };
+        println!("{} record for {} to {}", action, ddns_name, ip);
+    } else {
+        eprintln!("Failed to update DNS: {}", response.text()?);
+    }
+
+    Ok(())
 }

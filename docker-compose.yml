@@ -1,0 +1,8 @@
+services:
+  ddns:
+    container_name: ddns
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: release
+    restart: unless-stopped

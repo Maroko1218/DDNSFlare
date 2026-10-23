@@ -41,8 +41,22 @@ struct Args {
     ddns_name: String,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = get_args().ok_or("Usage: <api_key_file> <ddns_name>")?;
+enum RuntimeError {
+    NoIP(&'static str),
+    FailedApiCall(String),
+}
+
+impl From<reqwest::Error> for RuntimeError {
+    fn from(reqwest_error: reqwest::Error) -> Self {
+        RuntimeError::FailedApiCall(reqwest_error.to_string())
+    }
+}
+
+fn main() -> std::process::ExitCode {
+    let Some(args) = get_args() else {
+        eprintln!("Usage: <api_key_file> <ddns_name>");
+        return std::process::ExitCode::FAILURE;
+    };
 
     // We keep .expect here because the program literally cannot run without the key
     let api_key = std::fs::read_to_string(&args.api_key_file)
@@ -57,7 +71,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match update_cycle(&client, &api_key, &args) {
             Ok(_) => (),
-            Err(e) => eprintln!("Error during update cycle: {}", e),
+            Err(RuntimeError::NoIP(e)) => eprintln!("Error during update cycle: {}", e),
+            Err(RuntimeError::FailedApiCall(e)) => eprintln!("Error during update cycle: {}", e),
         }
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
@@ -67,7 +82,7 @@ fn update_cycle(
     client: &reqwest::blocking::Client,
     api_key: &str,
     args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), RuntimeError> {
     let ip = get_ip(client)?;
     let zones = get_zones(client, api_key)?;
 
@@ -79,12 +94,14 @@ fn update_cycle(
     Ok(())
 }
 
-fn get_ip(client: &reqwest::blocking::Client) -> Result<String, Box<dyn std::error::Error>> {
+fn get_ip(client: &reqwest::blocking::Client) -> Result<String, RuntimeError> {
     let text = client.get(GET_IP_URL).send()?.text()?;
     let ip_line = text
         .lines()
         .find(|line| line.starts_with("ip="))
-        .ok_or("Could not find IP line in Cloudflare trace")?;
+        .ok_or(RuntimeError::NoIP(
+            "Could not find IP line in Cloudflare trace",
+        ))?;
 
     Ok(ip_line.replace("ip=", "").to_string())
 }
@@ -92,24 +109,26 @@ fn get_ip(client: &reqwest::blocking::Client) -> Result<String, Box<dyn std::err
 fn get_zones(
     client: &reqwest::blocking::Client,
     api_key: &str,
-) -> Result<ZoneResponse, reqwest::Error> {
+) -> Result<ZoneResponse, RuntimeError> {
     client
         .get(format!("{API_URL}zones/"))
         .bearer_auth(api_key)
         .send()?
         .json()
+        .map_err(|_| RuntimeError::FailedApiCall("Couldn't parse json?".to_string()))
 }
 
 fn get_dns_records_of_zone(
     client: &reqwest::blocking::Client,
     api_key: &str,
     zone_id: &str,
-) -> Result<DnsResponse, reqwest::Error> {
+) -> Result<DnsResponse, RuntimeError> {
     client
         .get(format!("{API_URL}zones/{zone_id}/dns_records"))
         .bearer_auth(api_key)
         .send()?
         .json()
+        .map_err(|_| RuntimeError::FailedApiCall("Couldn't parse json?".to_string()))
 }
 
 fn get_args() -> Option<Args> {
@@ -130,7 +149,7 @@ fn update_or_create_record(
     zone_id: &str,
     ddns_name: &str,
     ip: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), RuntimeError> {
     let dns_data = get_dns_records_of_zone(client, api_key, zone_id)?;
 
     let mut request_builder = client.post(format!("{API_URL}zones/{zone_id}/dns_records"));
@@ -165,7 +184,12 @@ fn update_or_create_record(
         let action = if is_update { "Updated" } else { "Created" };
         println!("{} record for {} to {}", action, ddns_name, ip);
     } else {
-        eprintln!("Failed to update DNS: {}", response.text()?);
+        eprintln!(
+            "Failed to update DNS: {}",
+            response.text().map_err(|_| RuntimeError::FailedApiCall(
+                "Unable to read response body".to_string()
+            ))?
+        );
     }
 
     Ok(())

@@ -1,8 +1,9 @@
 services:
-  ddns:
-    container_name: ddns
+  ddnsflare:
+    container_name: ddnsflare
     build:
       context: .
       dockerfile: Dockerfile
     image: release
     restart: unless-stopped
+    command: your.domain.name.to.update

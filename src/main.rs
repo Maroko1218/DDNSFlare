@@ -77,12 +77,11 @@ fn update_cycle(
 
 fn get_ip(client: &reqwest::blocking::Client) -> Result<String, Box<dyn std::error::Error>> {
     let text = client.get(GET_IP_URL).send()?.text()?;
-    let ip_line = text
+    Ok(text
         .lines()
         .find(|line| line.starts_with("ip="))
-        .ok_or("Could not find IP line in Cloudflare trace")?;
-
-    Ok(ip_line.replace("ip=", "").clone())
+        .ok_or("Could not find IP line in Cloudflare trace")?
+        .replace("ip=", ""))
 }
 
 fn get_zones(

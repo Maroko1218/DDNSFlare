@@ -27,11 +27,11 @@ struct DnsRecord {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct DnsRecordPayload {
+struct DnsRecordPayload<'a> {
     #[serde(rename = "type")]
-    record_type: String,
-    name: String,
-    content: String,
+    record_type: &'a str,
+    name: &'a str,
+    content: &'a str,
     proxied: bool,
     ttl: u64,
 }
@@ -147,11 +147,11 @@ fn update_or_create_record(
     }
 
     let payload = DnsRecordPayload {
-        name: ddns_name.to_string(),
-        record_type: "A".to_string(),
+        name: ddns_name,
+        record_type: "A",
         proxied: false,
         ttl: 1, // 1 is Auto in Cloudflare
-        content: ip.to_string(),
+        content: ip,
     };
 
     let response = request_builder.bearer_auth(api_key).json(&payload).send()?;

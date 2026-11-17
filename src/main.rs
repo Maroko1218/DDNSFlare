@@ -82,7 +82,7 @@ fn get_ip(client: &reqwest::blocking::Client) -> Result<String, Box<dyn std::err
         .find(|line| line.starts_with("ip="))
         .ok_or("Could not find IP line in Cloudflare trace")?;
 
-    Ok(ip_line.replace("ip=", "").to_string())
+    Ok(ip_line.replace("ip=", "").clone())
 }
 
 fn get_zones(
@@ -135,9 +135,8 @@ fn update_or_create_record(
     for dns_record in dns_data.result {
         if dns_record.name == ddns_name && dns_record.record_type == "A" {
             if dns_record.content == ip {
-                return Ok(()); // IP matches, no action needed
+                return Ok(());
             }
-            // Switch to PATCH if the record already exists
             request_builder = client.patch(format!(
                 "{API_URL}zones/{zone_id}/dns_records/{}",
                 dns_record.id
@@ -151,7 +150,7 @@ fn update_or_create_record(
         name: ddns_name.to_string(),
         record_type: "A".to_string(),
         proxied: false,
-        ttl: 1, // '1' is Auto in Cloudflare
+        ttl: 1, // 1 is Auto in Cloudflare
         content: ip.to_string(),
     };
 
@@ -159,7 +158,7 @@ fn update_or_create_record(
 
     if response.status().is_success() {
         let action = if is_update { "Updated" } else { "Created" };
-        println!("{} record for {} to {}", action, ddns_name, ip);
+        println!("{action} record for {ddns_name} to {ip}");
     } else {
         eprintln!("Failed to update DNS: {}", response.text()?);
     }

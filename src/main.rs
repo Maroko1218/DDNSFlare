@@ -44,20 +44,16 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = get_args().ok_or("Usage: <api_key_file> <ddns_name>")?;
 
-    // We keep .expect here because the program literally cannot run without the key
     let api_key = std::fs::read_to_string(&args.api_key_file)
-        .expect("Cloudflare API key file could not be read")
-        .trim()
-        .to_string();
+        .expect("Cloudflare API key file could not be read");
 
     let client = reqwest::blocking::Client::new();
 
     println!("Starting DDNS update loop for {}...", args.ddns_name);
 
     loop {
-        match update_cycle(&client, &api_key, &args) {
-            Ok(_) => (),
-            Err(e) => eprintln!("Error during update cycle: {}", e),
+        if let Err(e) = update_cycle(&client, api_key.trim(), &args) {
+            eprintln!("Error during update cycle: {e}");
         }
         std::thread::sleep(std::time::Duration::from_secs(60));
     }

@@ -109,14 +109,14 @@ fn get_dns_records_of_zone(
 }
 
 fn get_args() -> Option<Args> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args = std::env::args().skip(1);
     if args.len() < 2 {
         return None;
     }
 
     Some(Args {
-        api_key_file: args[0].clone(),
-        ddns_name: args[1].clone(),
+        api_key_file: args.next()?,
+        ddns_name: args.next()?,
     })
 }
 
